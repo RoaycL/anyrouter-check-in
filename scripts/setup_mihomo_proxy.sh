@@ -98,11 +98,28 @@ fi
 if [[ -n "${PROXY_SITE_TEST_URL}" ]]; then
 	echo "[INFO] Selecting a proxy node compatible with the target site..."
 	SELECTED=false
-	mapfile -t PROXY_NODES < <(
-		curl -fsS --max-time 10 http://127.0.0.1:9090/providers/proxies/subscription |
-			python3 -c 'import json,sys; data=json.load(sys.stdin); [print(item["name"]) for item in data.get("proxies", []) if item.get("name")]'
-	)
+	PROXY_NODES=()
+	for attempt in $(seq 1 30); do
+		mapfile -t PROXY_NODES < <(
+			curl -fsS --max-time 10 http://127.0.0.1:9090/providers/proxies/subscription 2>/dev/null |
+				python3 -c 'import json,sys; data=json.load(sys.stdin); [print(item["name"]) for item in data.get("proxies", []) if item.get("name")]' 2>/dev/null || true
+		)
+		if [[ "${#PROXY_NODES[@]}" -gt 0 ]]; then
+			break
+		fi
+		echo "[INFO] Waiting for subscription nodes (${attempt}/30)..."
+		sleep 2
+	done
 
+	if [[ "${#PROXY_NODES[@]}" -eq 0 ]]; then
+		echo "[FAILED] Subscription provider loaded no proxy nodes"
+		tail -n 30 mihomo.log || true
+		if [[ "${PROXY_REQUIRED}" == "true" ]]; then
+			exit 1
+		fi
+	fi
+
+	echo "[INFO] Loaded ${#PROXY_NODES[@]} proxy node(s); testing target compatibility..."
 	for node in "${PROXY_NODES[@]}"; do
 		payload=$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1]}))' "${node}")
 		if ! curl -fsS --max-time 10 -X PUT \
