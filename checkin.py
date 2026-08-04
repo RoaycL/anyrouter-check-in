@@ -139,6 +139,75 @@ async def get_waf_cookies_with_browser(
 		return None
 
 
+async def login_with_api_credentials(
+	account_name: str,
+	provider_config,
+	email: str,
+	password: str,
+) -> BrowserLoginResult | None:
+	"""通过同一代理出口获取 WAF Cookie 并直接调用登录 API。"""
+	print(f'[PROCESSING] {account_name}: Logging in through API...')
+
+	waf_cookies = {}
+	if provider_config.needs_waf_cookies():
+		login_url = f'{provider_config.domain}{provider_config.login_path}'
+		waf_cookies = await get_waf_cookies_with_browser(
+			account_name,
+			login_url,
+			provider_config.waf_cookie_names,
+			use_proxy=provider_config.use_proxy,
+		)
+		if not waf_cookies:
+			print(f'[FAILED] {account_name}: Unable to get WAF cookies for API login')
+			return None
+
+	client_kwargs: dict = {'http2': True, 'timeout': 30.0}
+	proxy_url = get_proxy_server(use_proxy=provider_config.use_proxy)
+	if proxy_url:
+		client_kwargs['proxy'] = proxy_url
+		print(f'[INFO] {account_name}: API login proxy enabled')
+	elif provider_config.use_proxy:
+		print(f'[WARN] {account_name}: Provider requires proxy but CHECKIN_PROXY_URL is not set')
+
+	try:
+		with httpx.Client(**client_kwargs) as client:
+			client.cookies.update(waf_cookies)
+			response = client.post(
+				f'{provider_config.domain}/api/user/login',
+				json={'username': email, 'password': password},
+				headers={
+					'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+					'Accept': 'application/json, text/plain, */*',
+					'Content-Type': 'application/json',
+					'Origin': provider_config.domain,
+					'Referer': f'{provider_config.domain}{provider_config.login_path}',
+				},
+			)
+			try:
+				data = response.json()
+			except json.JSONDecodeError:
+				print(f'[FAILED] {account_name}: API login returned non-JSON response (HTTP {response.status_code})')
+				return None
+
+			if response.status_code != 200 or not data.get('success'):
+				message = data.get('message', f'HTTP {response.status_code}')
+				print(f'[FAILED] {account_name}: API login failed - {message}')
+				return None
+
+			profile = data.get('data') or {}
+			api_user = str(profile['id']) if profile.get('id') is not None else None
+			cookies = {cookie.name: cookie.value for cookie in client.cookies.jar}
+			if not cookies.get('session') or not api_user:
+				print(f'[FAILED] {account_name}: API login succeeded but session/user id is missing')
+				return None
+
+			print(f'[SUCCESS] {account_name}: API login successful')
+			return BrowserLoginResult(cookies=cookies, api_user=api_user)
+	except Exception as e:
+		print(f'[FAILED] {account_name}: API login error - {str(e)[:80]}')
+		return None
+
+
 async def login_with_credentials(
 	account_name: str,
 	provider_config,
@@ -369,13 +438,21 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 	if account.has_login_credentials():
 		print(f'[INFO] {account_name}: Attempting email/password login (priority)...')
 		assert account.email is not None and account.password is not None
-		login_result = await login_with_credentials(
-			account_name,
-			provider_config,
-			account.provider,
-			account.email,
-			account.password,
-		)
+		if account.provider == 'agentrouter':
+			login_result = await login_with_api_credentials(
+				account_name,
+				provider_config,
+				account.email,
+				account.password,
+			)
+		else:
+			login_result = await login_with_credentials(
+				account_name,
+				provider_config,
+				account.provider,
+				account.email,
+				account.password,
+			)
 		if login_result:
 			all_cookies = login_result.cookies
 			resolved_api_user = login_result.api_user
