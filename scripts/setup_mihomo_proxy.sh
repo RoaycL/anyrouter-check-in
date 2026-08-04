@@ -38,6 +38,34 @@ gunzip -f "${ARCHIVE}"
 chmod +x "mihomo-linux-amd64-${MIHOMO_VERSION}"
 MIHOMO_BIN="${PROXY_DIR}/mihomo-linux-amd64-${MIHOMO_VERSION}"
 
+echo "[INFO] Downloading proxy subscription/configuration..."
+if ! curl --retry 3 --retry-delay 3 --retry-all-errors -fsSL \
+	-o source-subscription.yaml "${PROXY_SUBSCRIPTION_URL}"; then
+	echo "[FAILED] Unable to download proxy subscription/configuration"
+	exit 1
+fi
+
+# 同时兼容纯 provider 订阅与完整 Mihomo 配置。provider 文件只允许顶层 proxies。
+if ! uv run python - <<'PY'
+import sys
+import yaml
+
+with open('source-subscription.yaml', encoding='utf-8') as source:
+    data = yaml.safe_load(source)
+
+if not isinstance(data, dict) or not isinstance(data.get('proxies'), list) or not data['proxies']:
+    print('[FAILED] Subscription/configuration contains no inline proxies')
+    sys.exit(1)
+
+with open('subscription.yaml', 'w', encoding='utf-8') as target:
+    yaml.safe_dump({'proxies': data['proxies']}, target, allow_unicode=True, sort_keys=False)
+
+print(f'[INFO] Extracted {len(data["proxies"])} inline proxy node(s)')
+PY
+then
+	exit 1
+fi
+
 cat > config.yaml <<EOF
 mixed-port: ${PROXY_PORT}
 external-controller: 127.0.0.1:9090
@@ -49,9 +77,7 @@ unified-delay: true
 
 proxy-providers:
   subscription:
-    type: http
-    url: "${PROXY_SUBSCRIPTION_URL}"
-    interval: 3600
+    type: file
     path: ./subscription.yaml
     health-check:
       enable: true
