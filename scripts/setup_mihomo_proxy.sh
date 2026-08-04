@@ -2,7 +2,8 @@
 # 通过 mihomo 拉取订阅、启动本地代理并探测可用节点。
 # 环境变量:
 #   PROXY_SUBSCRIPTION_URL  订阅链接（必填才启用）
-#   PROXY_TEST_URL          探测目标，默认 https://www.google.com/generate_204
+#   PROXY_TEST_URL          基础连通性探测目标，默认 https://www.google.com/generate_204
+#   PROXY_SITE_TEST_URL     站点兼容性探测目标；设置后逐节点检查是否返回 JSON
 #   PROXY_REQUIRED          true 时探测失败则退出 1
 #   PROXY_PORT              本地 mixed-port，默认 7890
 
@@ -16,6 +17,7 @@ fi
 PROXY_DIR="${RUNNER_TEMP:-/tmp}/checkin-proxy"
 PROXY_PORT="${PROXY_PORT:-7890}"
 PROXY_TEST_URL="${PROXY_TEST_URL:-https://www.google.com/generate_204}"
+PROXY_SITE_TEST_URL="${PROXY_SITE_TEST_URL:-}"
 MIHOMO_VERSION="${MIHOMO_VERSION:-v1.19.0}"
 PROXY_REQUIRED="${PROXY_REQUIRED:-false}"
 
@@ -38,6 +40,7 @@ MIHOMO_BIN="${PROXY_DIR}/mihomo-linux-amd64-${MIHOMO_VERSION}"
 
 cat > config.yaml <<EOF
 mixed-port: ${PROXY_PORT}
+external-controller: 127.0.0.1:9090
 allow-lan: false
 ipv6: false
 mode: rule
@@ -57,11 +60,7 @@ proxy-providers:
 
 proxy-groups:
   - name: CHECKIN
-    type: url-test
-    url: "${PROXY_TEST_URL}"
-    interval: 300
-    tolerance: 150
-    lazy: false
+    type: select
     use:
       - subscription
 
@@ -94,6 +93,43 @@ if [[ "${READY}" != "true" ]]; then
 		exit 1
 	fi
 	exit 0
+fi
+
+if [[ -n "${PROXY_SITE_TEST_URL}" ]]; then
+	echo "[INFO] Selecting a proxy node compatible with the target site..."
+	SELECTED=false
+	mapfile -t PROXY_NODES < <(
+		curl -fsS --max-time 10 http://127.0.0.1:9090/providers/proxies/subscription |
+			python3 -c 'import json,sys; data=json.load(sys.stdin); [print(item["name"]) for item in data.get("proxies", []) if item.get("name")]'
+	)
+
+	for node in "${PROXY_NODES[@]}"; do
+		payload=$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1]}))' "${node}")
+		if ! curl -fsS --max-time 10 -X PUT \
+			-H 'Content-Type: application/json' \
+			-d "${payload}" \
+			http://127.0.0.1:9090/proxies/CHECKIN >/dev/null; then
+			continue
+		fi
+
+		if response=$(curl -fsS -x "${PROXY_URL}" --max-time 20 \
+			-H 'Accept: application/json' \
+			-H 'User-Agent: Mozilla/5.0' \
+			"${PROXY_SITE_TEST_URL}" 2>/dev/null) && \
+			printf '%s' "${response}" | python3 -c 'import json,sys; data=json.load(sys.stdin); sys.exit(0 if isinstance(data, dict) else 1)' 2>/dev/null; then
+			echo "[SUCCESS] Found a target-compatible proxy node"
+			SELECTED=true
+			break
+		fi
+		echo "[INFO] Current node is blocked by target verification, trying next node..."
+	done
+
+	if [[ "${SELECTED}" != "true" ]]; then
+		echo "[FAILED] No proxy node returned valid JSON from target site"
+		if [[ "${PROXY_REQUIRED}" == "true" ]]; then
+			exit 1
+		fi
+	fi
 fi
 
 echo "[SUCCESS] Proxy is ready: ${PROXY_URL}"
