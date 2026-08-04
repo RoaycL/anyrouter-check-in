@@ -60,7 +60,21 @@ jobs:
 
     - name: 安装 CloakBrowser
       run: |
+        set +e
         uv run python -m cloakbrowser install
+        install_status=$?
+        set -e
+
+        if [ "${install_status}" -ne 0 ]; then
+          browser_binary=$(find "$HOME/.cloakbrowser" -maxdepth 3 -type f -name chrome -perm -u+x -print -quit 2>/dev/null || true)
+          if [ "${install_status}" -eq 139 ] && [ -n "${browser_binary}" ]; then
+            echo "⚠️ CloakBrowser 安装器退出码为 139，但已验证浏览器二进制存在：${browser_binary}"
+          else
+            echo "❌ CloakBrowser 安装失败，退出码：${install_status}"
+            exit "${install_status}"
+          fi
+        fi
+
         echo "✅ CloakBrowser 安装完成"
 
     - name: 恢复余额历史缓存
